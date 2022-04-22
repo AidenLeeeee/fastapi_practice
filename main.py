@@ -1,8 +1,9 @@
-from fastapi import FastAPI, Form, File, UploadFile, HTTPException, status, Request
+from fastapi import FastAPI, Form, File, UploadFile, HTTPException, status, Request, Depends
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from tempfile import NamedTemporaryFile
-from typing import IO
+from typing import IO, Optional
+from pydantic import BaseModel, Field
 
 
 app = FastAPI()
@@ -13,6 +14,8 @@ users = {
     2: {"name": "Campus"},
     3: {"name": "API"},
 }
+
+items = ({"name": "Foo"}, {"name": "Bar"}, {"name": "Baz"})
 
 
 class SomeError(Exception):
@@ -77,3 +80,22 @@ async def some_error_handler(request: Request, exc: SomeError):
 @app.get("/error")
 async def get_error():
     raise SomeError("Hello", 501)
+
+
+# Dependency Injection
+class PydanticParams(BaseModel):
+    q: Optional[str] = Field(None, min_length=2)
+    offset: int = Field(0, ge=0)
+    limit: int = Field(100, gt=0)
+
+
+@app.get("/items/pydantic")
+async def get_items_with_pydantic(params: PydanticParams = Depends()):
+    response = {}
+    if params.q:
+        response.update({"q": params.q})
+
+    result = items[params.offset: params.offset + params.limit]
+    response.update({"items": result})
+
+    return response
