@@ -1,101 +1,70 @@
-from fastapi import FastAPI, Form, File, UploadFile, HTTPException, status, Request, Depends
-from fastapi.responses import JSONResponse
-from fastapi.staticfiles import StaticFiles
-from tempfile import NamedTemporaryFile
-from typing import IO, Optional
-from pydantic import BaseModel, Field
+from datetime import datetime, timedelta
+from typing import Optional
+
+import bcrypt
+from fastapi import Depends, FastAPI, HTTPException
+from fastapi.security import (
+    HTTPBearer,
+    HTTPAuthorizationCredentials,
+    OAuth2PasswordRequestForm,
+)
+from pydantic import BaseModel
+from jose import jwt
+from jose.exceptions import ExpiredSignatureError
 
 
 app = FastAPI()
-app.mount("/static", StaticFiles(directory="static"), name="static")
+security = HTTPBearer()
 
-users = {
-    1: {"name": "Fast"},
-    2: {"name": "Campus"},
-    3: {"name": "API"},
+ALGORITHM = "HS256"
+SECRET_KEY = "e9f17f1273a60019da967cd0648bdf6fd06f216ce03864ade0b51b29fa273d75"
+fake_user_db = {
+    "fastcampus": {
+        "id": 1,
+        "username": "fastcampus",
+        "email": "fastcampus@fastcampus.com",
+        "password": "$2b$12$kEsp4W6Vrm57c24ez4H1R.rdzYrXipAuSUZR.hxbqtYpjPLWbYtwS",
+    }
 }
 
-items = ({"name": "Foo"}, {"name": "Bar"}, {"name": "Baz"})
+
+class User(BaseModel):
+    id: int
+    username: str
+    email: str
 
 
-class SomeError(Exception):
-    def __init__(self, name: str, code: int):
-        self.name = name
-        self.code = code
-
-    def __str__(self):
-        return f"<{self.name}> is occured. code: <{self.code}>"
+class UserPayload(User):
+    exp: datetime
 
 
-async def save_file(file: IO):
-    # s3 업로드라고 생각해 봅시다. delete=True(기본값)이면
-    # 현재 함수가 닫히고 파일도 지워집니다.
-    with NamedTemporaryFile("wb", delete=False) as tempfile:
-        tempfile.write(file.read())
-        return tempfile.name
+async def create_access_token(data: dict, exp: Optional[timedelta] = None):
+    expire = datetime.utcnow() + (exp or timedelta(minutes=30))
+    user_info = UserPayload(**data, exp=expire)
+
+    return jwt.encode(user_info.dict(), SECRET_KEY, algorithm=ALGORITHM)
+
+
+async def get_user(cred: HTTPAuthorizationCredentials = Depends(security)):
+    token = cred.credentials
+    try:
+        decoded_data = jwt.decode(token, SECRET_KEY, ALGORITHM)
+    except ExpiredSignatureError:
+        raise HTTPException(401, "Expired")
+    user_info = User(**decoded_data)
+
+    return fake_user_db[user_info.username]
 
 
 @app.post("/login")
-def login(username: str = Form(...), password: str = Form(...)):
-    return {"username": username}
+async def issue_token(data: OAuth2PasswordRequestForm = Depends()):
+    user = fake_user_db[data.username]
+
+    if bcrypt.checkpw(data.password.encode(), user["password"].encode()):
+        return await create_access_token(user, exp=timedelta(minutes=30))
+    raise HTTPException(401)
 
 
-@app.get("/users/{user_id}")
-async def get_user(user_id: int):
-    if user_id not in users.keys():
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"<User: {user_id}> is not exists.",
-        )
-    return users[user_id]
-
-
-@app.post("/file/size")
-def get_filesize(file: bytes = File(...)):
-    return {"file_size": len(file)}
-
-
-@app.post("/file/info")
-def get_file_info(file: UploadFile = File(...)):
-    return {
-        "content_type": file.content_type,
-        "filename": file.filename
-    }
-
-
-@app.post("/file/store")
-async def store_file(file: UploadFile = File(...)):
-    path = await save_file(file.file)
-    return {"filepath": path}
-
-
-# Error
-@app.exception_handler(SomeError)
-async def some_error_handler(request: Request, exc: SomeError):
-    return JSONResponse(
-        content={"message": f"error is {exc.name}"}, status_code=exc.code
-    )
-
-
-@app.get("/error")
-async def get_error():
-    raise SomeError("Hello", 501)
-
-
-# Dependency Injection
-class PydanticParams(BaseModel):
-    q: Optional[str] = Field(None, min_length=2)
-    offset: int = Field(0, ge=0)
-    limit: int = Field(100, gt=0)
-
-
-@app.get("/items/pydantic")
-async def get_items_with_pydantic(params: PydanticParams = Depends()):
-    response = {}
-    if params.q:
-        response.update({"q": params.q})
-
-    result = items[params.offset: params.offset + params.limit]
-    response.update({"items": result})
-
-    return response
+@app.get("/users/me", response_model=User)
+async def get_current_user(user: dict = Depends(get_user)):
+    return user
